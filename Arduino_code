@@ -1,0 +1,182 @@
+#define BLYNK_TEMPLATE_ID "TMPL3NgBe-MpD"
+#define BLYNK_TEMPLATE_NAME "BOT control"
+#define BLYNK_AUTH_TOKEN "R6OfM_kfai_lIT_Pq76RBXo27AVd-WWg"
+
+#define BLYNK_PRINT Serial
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+// ESP32 PWM helper library
+
+// ------------------- MOTORS -------------------
+#define ENA  25  
+#define IN1  26
+#define IN2  27
+#define ENB  14
+#define IN3  12
+#define IN4  13  
+ 
+
+int x = 50, y = 50;
+int Speed = 150;         
+
+
+// ------------------- MQ SENSORS -------------------
+#define MQ135_PIN 34
+#define MQ2_PIN   35
+#define RL 10000.0  // 10kΩ load resistor
+
+float R0_MQ135 = 10000.0;  
+float R0_MQ2   = 10000.0;
+
+float cleanAir_MQ135 = 3.6;
+float cleanAir_MQ2   = 9.8;
+
+// ------------------- WIFI + BLYNK -------------------
+char auth[] = BLYNK_AUTH_TOKEN;
+char ssid[] = "PIKACHU"; 
+char pass[] = "07062006"; 
+
+// ------------------- FUNCTIONS -------------------
+void calibrateSensor(int pin, float cleanAirFactor, float &R0) {
+  long avgADC = 0;
+  for (int i = 0; i < 100; i++) {
+    avgADC += analogRead(pin);
+    delay(50);
+  }
+  avgADC /= 100;
+  float Vout = (avgADC / 4095.0) * 3.3;
+  float Rs = ((3.3 - Vout) / Vout) * RL;
+  R0 = Rs / cleanAirFactor;
+
+  Serial.print("Sensor on pin ");
+  Serial.print(pin);
+  Serial.print(" calibrated, R0 = ");
+  Serial.println(R0);
+}
+
+float readGasPPM(int pin, float R0, float a, float b) {
+  int adcValue = analogRead(pin);
+  float Vout = (adcValue / 4095.0) * 3.3;
+  float Rs = ((3.3 - Vout) / Vout) * RL;
+  float ratio = Rs / R0;
+  float ppm = a * pow(ratio, b);
+  return ppm;
+}
+
+// ------------------- BLYNK HANDLERS -------------------
+BLYNK_WRITE(V0) { x = param.asInt(); }        
+BLYNK_WRITE(V1) { y = param.asInt(); }         
+BLYNK_WRITE(V2) { Speed = param.asInt(); }     
+
+
+// ------------------- MOTOR CONTROL -------------------
+void Forward() {
+  analogWrite(ENA, Speed);
+  analogWrite(ENB, Speed);
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void Backward() {
+  analogWrite(ENA, Speed);
+  analogWrite(ENB, Speed);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, HIGH);
+}
+
+void Right() {
+  analogWrite(ENA, Speed);
+  analogWrite(ENB, Speed);
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+}
+
+void Left() {
+  analogWrite(ENA, Speed);
+  analogWrite(ENB, Speed);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void carStop() {
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+}
+
+void Control_Car() {
+  if (y > 70) {
+    Forward();
+  } else if (y < 30) {
+    Backward();
+  } else if (x < 30) {
+    Left();
+  } else if (x > 70) {
+    Right();
+  } else {
+    carStop();
+  }
+}
+
+// ------------------- SETUP -------------------
+void setup() {
+  Serial.begin(115200);
+
+  // Motor pins
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+ 
+
+  // Connect Blynk
+  Serial.println("Connecting to WiFi & Blynk...");
+  Blynk.begin(auth, ssid, pass, "blynk.cloud", 80);
+  Serial.println("WiFi connected!");
+
+  // Calibrate gas sensors
+  calibrateSensor(MQ135_PIN, cleanAir_MQ135, R0_MQ135);
+  calibrateSensor(MQ2_PIN, cleanAir_MQ2, R0_MQ2);
+}
+
+// ------------------- LOOP -------------------
+void loop() {
+  Blynk.run();
+  
+
+  // Car control
+  Control_Car();
+
+  // Gas sensor readings
+  float ppm_MQ135 = readGasPPM(MQ135_PIN, R0_MQ135, 100.0, -2.0);  
+  float ppm_MQ2   = readGasPPM(MQ2_PIN,   R0_MQ2,   200.0, -2.1);
+
+  // Send to Blynk
+  Blynk.virtualWrite(V3, ppm_MQ135);
+  Blynk.virtualWrite(V4, ppm_MQ2);
+
+  // Print to Serial   
+  Serial.print("MQ135 (Air Quality/NH3) PPM: ");
+  Serial.println   (ppm_MQ135);
+  Serial.print("MQ2 (Smoke/LPG) PPM: ");
+  Serial.println(ppm_MQ2);
+
+  // Alert condition
+  if (ppm_MQ135 > 5 || ppm_MQ2 > 10) {
+    Blynk.logEvent("gas_alert", "Dangerous gas level detected!");
+  }
+
+  delay(500);
+}
